@@ -1,161 +1,167 @@
-🔔 Intelligent Notification Decision Engine
+# 🔔 Notification Prioritization Engine
 
-Cyepro Solutions – Assignment Submission
-Drive Code: OC.36641.2026.57933
-Built using Python + Flask
-AI Assistance: Claude (Anthropic)
+**Cyepro Solutions — Assignment Task | OC.36641.2026.57933**  
+Built with Python + Flask | AI tools used: Claude (Anthropic)
 
-1️⃣ Overview
+---
 
-Modern applications generate excessive notifications — promotional pushes, reminders, alerts, system updates, and more. Without control, users experience:
+## 📌 Problem Summary
 
-Notification spam
+Users receive too many notifications — some repetitive, some at bad times, some low-value while important ones are delayed. This engine decides for **every incoming notification event**: should it be sent **Now**, **Later**, or **Never**?
 
-Repeated duplicate messages
+---
 
-Alerts delivered at inconvenient times
+## 🏗️ System Architecture
 
-Important notifications getting buried
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Upstream Services                               │
+│      (chat-service, marketing, calendar, monitoring, etc.)          │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            │  POST /api/v1/notify/classify
+                            ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                  API Gateway / Load Balancer                        │
+│                 (rate limiting, auth, routing)                      │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│              Notification Prioritization Engine                     │
+│                                                                     │
+│  ┌─────────────┐  ┌──────────────┐  ┌───────────────────────────┐  │
+│  │  Classifier │→ │ Rule Engine  │→ │  Decision Output          │  │
+│  │  (now/later/│  │ (configurable│  │  now / later / never      │  │
+│  │   never)    │  │  JSON rules) │  │  + reason + defer_seconds │  │
+│  └─────────────┘  └──────────────┘  └───────────────────────────┘  │
+│           │                                                         │
+│  ┌────────▼──────────────────────────────────────────────────────┐ │
+│  │                 Decision Pipeline (in order)                  │ │
+│  │   1. Expiry Check  →  2. Dedup Check  →  3. Cooldown Check   │ │
+│  │   4. Fatigue Check  →  5. Quiet Hours  →  6. SEND NOW        │ │
+│  └───────────────────────────────────────────────────────────────┘ │
+└──────┬──────────────┬─────────────────────────────────────────────┘
+       │              │
+       ▼              ▼
+┌──────────┐   ┌─────────────┐   ┌────────────────────────────────┐
+│  Dedupe  │   │  Notification│   │         Audit Log              │
+│  Store   │   │  History /   │   │  (every decision + reason)     │
+│ (Redis/  │   │  Fatigue     │   │                                │
+│  In-Mem) │   │  Counters    │   └────────────────────────────────┘
+└──────────┘   └─────────────┘
+```
 
-This project implements a Notification Decision Engine that determines, for every incoming event:
+### Components
 
-Should this notification be delivered Now, deferred for Later, or suppressed Forever?
+| Component | Role |
+|---|---|
+| **API Layer** | Flask REST API — 5 endpoints for classify, batch, audit, rules, history |
+| **Decision Engine** | Ordered pipeline of checks, returns Now/Later/Never + reason |
+| **Rule Engine** | Human-configurable JSON rules — update without redeployment |
+| **Dedup Store** | Exact key + content-hash based duplicate detection (Redis in prod) |
+| **Notification History** | Per-user event log for fatigue tracking (Redis Sorted Sets in prod) |
+| **Audit Log** | Immutable append-only log of every decision with reason |
 
-The system ensures that:
+---
 
-🚨 Critical alerts always reach the user
+## 🧠 Decision Logic — Now / Later / Never
 
-📢 Promotions and low-value content are controlled
+Every notification passes through a **sequential pipeline** of checks. The first failing check determines the outcome.
 
-😴 User fatigue is actively managed
+```
+Incoming Event
+      │
+      ▼
+┌─────────────────────┐
+│ 1. Is it expired?   │ ──YES──→ NEVER  "Notification expired"
+└────────┬────────────┘
+         │ NO
+         ▼
+┌─────────────────────┐
+│ 2. Is it a          │ ──YES──→ NEVER  "Exact/near-duplicate seen Xs ago"
+│    duplicate?       │
+└────────┬────────────┘
+         │ NO
+         ▼
+┌─────────────────────┐
+│ 3. Is event_type in │ ──YES (and not time-sensitive)──→ LATER  "Cooldown Xs remaining"
+│    cooldown?        │
+└────────┬────────────┘
+         │ NO
+         ▼
+┌─────────────────────┐
+│ 4. User hit hourly/ │ ──YES (and not time-sensitive)──→ LATER/NEVER  "Alert fatigue"
+│    daily cap?       │
+└────────┬────────────┘
+         │ NO
+         ▼
+┌─────────────────────┐
+│ 5. Quiet hours?     │ ──YES (and not time-sensitive)──→ LATER  "Defer to 8am"
+└────────┬────────────┘
+         │ NO
+         ▼
+       SEND NOW ✅
+```
 
-2️⃣ High-Level Architecture
-Request Flow
-Upstream Service
-(chat, marketing, monitoring, etc.)
-        │
-        ▼
-POST /api/v1/notify/classify
-        │
-        ▼
-Notification Decision Engine
-        │
-        ▼
-Decision: now | later | never
-Internal Components
-Module	Responsibility
-API Layer	Exposes REST endpoints
-Decision Engine	Executes ordered validation checks
-Rule Manager	Handles configurable suppression rules
-Deduplication Store	Prevents repeated messages
-User History Tracker	Tracks fatigue limits
-Audit Logger	Logs every decision with reasoning
+**Time-sensitive override:** Events with `event_type: alert / system_event` or `priority_hint: critical / urgent` **bypass steps 3, 4, and 5** and always send immediately.
 
-The engine is stateless and can scale horizontally when backed by Redis.
+---
 
-3️⃣ Decision Strategy
+## 📊 Data Model
 
-Each notification goes through a strict ordered pipeline.
+### NotificationEvent (Input)
 
-The first rule that fails determines the outcome.
-
-🧠 Decision Flow
-Step 1 — Expiry Validation
-
-If the notification has already expired →
-➡ Decision: never
-
-Step 2 — Duplicate Detection
-
-Two detection mechanisms are applied:
-
-Exact match via dedupe_key
-
-Near-duplicate match via MD5 hash of content
-
-If detected →
-➡ Decision: never
-
-Step 3 — Event Cooldown
-
-Certain event types require spacing between messages.
-
-Example:
-
-Promotion → 1 hour gap
-
-Reminder → 30 minutes
-
-Alert → No cooldown
-
-If cooldown active →
-➡ Decision: later
-
-Step 4 — Fatigue Limits
-
-User-based suppression rules:
-
-Max notifications per hour
-
-Max notifications per day
-
-If threshold exceeded:
-
-Low priority → never
-
-Medium priority → later
-
-Step 5 — Quiet Hours
-
-Configured window:
-22:00 – 08:00 UTC
-
-If notification is non-urgent during this period →
-➡ Deferred to next valid time (8 AM)
-
-⚡ Time-Sensitive Override
-
-If:
-
-event_type = alert OR system_event
-OR
-priority_hint = critical / urgent
-
-The notification bypasses:
-
-Cooldown
-
-Fatigue limits
-
-Quiet hours
-
-And is immediately sent.
-
-4️⃣ Input & Output Schemas
-🔹 NotificationEvent (Input)
+```json
 {
   "user_id": "u123",
   "event_type": "promotion",
-  "message": "Flat 20% discount today!",
+  "message": "Get 20% off today!",
+  "source": "marketing-service",
   "priority_hint": "low",
-  "channel": "push",
   "timestamp": "2026-02-27T10:00:00Z",
+  "channel": "push",
+  "metadata": {},
+  "dedupe_key": "promo_feb27_u123",
   "expires_at": "2026-02-27T23:59:00Z"
 }
-🔹 DecisionResponse (Output)
+```
+
+### DecisionRecord (Output + Audit)
+
+```json
 {
-  "notification_id": "uuid",
+  "notification_id": "uuid-v4",
+  "user_id": "u123",
+  "event_type": "promotion",
   "decision": "later",
-  "reason": "Cooldown active for 'promotion'",
-  "defer_seconds": 3600,
-  "processed_at": "2026-02-27T10:00:01Z"
+  "reason": "Cooldown active for 'promotion': 3599s remaining",
+  "defer_seconds": 3599,
+  "channel": "push",
+  "timestamp": "2026-02-27T10:00:01Z"
 }
-5️⃣ Rule Configuration (Dynamic)
+```
 
-Rules can be updated via API without restarting the server.
+### NotificationHistory (per user)
 
-Example configuration:
+```json
+{
+  "user_id": "u123",
+  "events": [
+    { "ts": 1735300000, "event_type": "message", "decision": "now", "notification_id": "..." }
+  ]
+}
+```
 
+### DedupeStore (key-value)
+
+```
+dedupe_key   →  { "timestamp": unix_ts }           // exact match
+hash_<md5>   →  { "timestamp": unix_ts }           // near-duplicate content hash
+```
+
+### SuppressionRules (configurable)
+
+```json
 {
   "quiet_hours": { "start": 22, "end": 8 },
   "max_per_hour": 10,
@@ -169,171 +175,214 @@ Example configuration:
     "system_event": 0
   }
 }
+```
 
-Rules are designed to be externally configurable in production.
+---
 
-6️⃣ REST API Endpoints
-1️⃣ Classify Single Notification
-POST /api/v1/notify/classify
+## 🔌 API Endpoints
 
-Returns decision for one event.
+### 1. `POST /api/v1/notify/classify`
+Classify a single notification event.
 
-2️⃣ Batch Classification
-POST /api/v1/notify/batch
+**Request:**
+```json
+{
+  "user_id": "u123",
+  "event_type": "reminder",
+  "message": "Your meeting starts in 15 minutes",
+  "channel": "push"
+}
+```
 
-Supports up to 100 notifications per request.
+**Response:**
+```json
+{
+  "notification_id": "550e8400-e29b-41d4-a716-446655440000",
+  "decision": "now",
+  "reason": "Passed all checks. Priority: normal.",
+  "defer_seconds": null,
+  "processed_at": "2026-02-27T10:00:01Z"
+}
+```
 
-Returns summary counts:
+---
 
-now
+### 2. `POST /api/v1/notify/batch`
+Classify up to 100 events in one request.
 
-later
+**Response:**
+```json
+{
+  "total": 3,
+  "summary": { "now": 2, "later": 1, "never": 0 },
+  "results": [ ... ]
+}
+```
 
-never
+---
 
-3️⃣ Audit Logs
-GET /api/v1/audit/logs
+### 3. `GET /api/v1/audit/logs?user_id=u123&decision=never&limit=20`
+Retrieve audit logs with filtering. Every decision is logged with full reason.
 
-Supports filters:
+---
 
-user_id
+### 4. `GET | PUT /api/v1/rules`
+View or update suppression rules **without redeployment**.
 
-decision
+**PUT Request:**
+```json
+{ "max_per_hour": 15, "cooldown_seconds": { "promotion": 7200 } }
+```
 
-limit
+---
 
-4️⃣ Rules Management
-GET /api/v1/rules
-PUT /api/v1/rules
+### 5. `GET /api/v1/users/{user_id}/history`
+View a user's recent notification history and remaining daily/hourly quota.
 
-Allows runtime rule updates.
+---
 
-5️⃣ User Notification History
-GET /api/v1/users/{user_id}/history
+## 🔁 Duplicate Prevention
 
-Returns:
+Two complementary strategies:
 
-Recent notifications
+| Strategy | Mechanism | Window |
+|---|---|---|
+| **Exact Duplicate** | Match on provided `dedupe_key` | 1 hour |
+| **Near-Duplicate** | MD5 hash of `user_id + event_type + message[:100]` | 5 minutes |
 
-Remaining hourly quota
+**Why both?** `dedupe_key` may be missing or unreliable (upstream bug, retry storms). Content hashing catches cases where two services send semantically identical messages with no key, or where the same event is retried without a key.
 
-Remaining daily quota
+---
 
-7️⃣ Duplicate Prevention Model
+## 😴 Alert Fatigue Strategy
 
-Two-layer defense:
+| Mechanism | How it works |
+|---|---|
+| **Hourly cap** | After N notifications/hour → defer remaining to next hour |
+| **Daily cap** | After M notifications/day → suppress low-priority ones |
+| **Cooldown per event_type** | Promotions: 1hr gap. Reminders: 30min gap. Alerts: 0 (always send) |
+| **Quiet hours** | 10pm–8am UTC → non-urgent deferred to 8am |
+| **Time-sensitive override** | `alert`, `system_event`, `priority_hint: critical/urgent` bypass ALL fatigue limits |
 
-Method	Purpose	Duration
-dedupe_key match	Prevent exact retry storms	1 hour
-Content hash match	Catch near-identical messages	5 minutes
+The combination ensures **important notifications always get through** while **promotional/low-value ones are batched or suppressed**.
 
-This prevents:
+---
 
-Retry floods
+## 🛡️ Fallback Strategy
 
-Multiple services sending similar content
+When the classification engine fails (exception, timeout, dependency down):
 
-Accidental repeated pushes
+```python
+# From app.py
+except Exception as e:
+    result = {
+        "decision": "now" if is_time_sensitive(event) else "later",
+        "reason": f"[FALLBACK] Engine error. Defaulting to safe mode.",
+        "defer_seconds": 300,
+    }
+```
 
-8️⃣ Failure Handling Philosophy
+| Situation | Behavior |
+|---|---|
+| Engine throws exception | Critical events → send now. Others → defer 5 min |
+| Dependency (Redis) unavailable | Falls back to in-memory store |
+| Malformed input | Returns 400 with clear error message |
+| Unknown event_type | Treated as low-priority, normal pipeline applies |
 
-The engine follows a fail-safe strategy.
+**Key principle:** Critical notifications are **never silently dropped**. The system fails *open* for alerts and *closed* for promotions.
 
-If classification fails:
+---
 
-if critical_event:
-    decision = "now"
-else:
-    decision = "later"
-Behavior Summary
-Scenario	Outcome
-Engine crash	Safe fallback applied
-Redis unavailable	In-memory fallback
-Invalid payload	400 error
-Unknown event_type	Treated as low priority
+## 📈 Metrics & Monitoring Plan
 
-Principle:
+### Key Metrics to Track
 
-Never silently drop critical alerts.
+| Metric | Why |
+|---|---|
+| `decisions_by_type` (now/later/never per event_type) | Understand suppression patterns |
+| `p99 classification latency` | Ensure low-latency SLA |
+| `fallback_trigger_count` | Alert when engine degrades |
+| `duplicate_suppression_rate` | Validate dedup effectiveness |
+| `fatigue_defer_rate per user` | Identify noisy upstream services |
+| `quiet_hours_defer_volume` | Tune quiet hours windows |
 
-9️⃣ Metrics & Observability Plan
+### Alerting
 
-To support production readiness, the following metrics are proposed:
+- `fallback_trigger_count > 10/min` → PagerDuty alert (engine degraded)
+- `p99 latency > 200ms` → Scale up instances
+- `never_rate > 40%` → Investigate upstream service flooding
 
-Decision distribution (now/later/never)
+### Dashboards
 
-p99 classification latency
+- Per-user fatigue trends
+- Decision distribution by channel and event_type
+- Suppression rules change history (audit trail)
 
-Fallback invocation rate
+---
 
-Duplicate suppression rate
+## 🚀 Running the Project
 
-User fatigue trends
-
-Quiet hours deferrals
-
-Alert Conditions
-
-High fallback rate → Engine degradation alert
-
-High latency → Scale horizontally
-
-Excessive suppression rate → Investigate upstream services
-
-🔟 Running the Application
-Install Dependencies
+### Prerequisites
+```bash
 pip install flask
-Start Server
+```
+
+### Start the server
+```bash
 python app.py
+```
+Server runs at `http://localhost:5000`
 
-Runs at:
-
-http://localhost:5000
-Run Demo Script
+### Run the demo (tests all endpoints)
+```bash
 python demo.py
+```
 
-Simulates multiple decision scenarios.
-
-Sample cURL
+### Example cURL
+```bash
+# Classify a single notification
 curl -X POST http://localhost:5000/api/v1/notify/classify \
   -H "Content-Type: application/json" \
   -d '{
     "user_id": "u001",
     "event_type": "alert",
-    "message": "Database connection failed",
-    "priority_hint": "critical",
-    "channel": "sms"
+    "message": "Server is down!",
+    "channel": "sms",
+    "priority_hint": "critical"
   }'
-🏭 Production Evolution Plan
-Current Implementation	Production Upgrade
-In-memory storage	Redis with TTL
-Single instance	Horizontal scaling
-No authentication	API key / JWT
-Sync processing	Async queue for deferred jobs
-Local rules	Centralized config service
-🤖 AI Usage Disclosure
 
-AI assistance (Claude – Anthropic) was used for:
+# Update rules (no redeployment!)
+curl -X PUT http://localhost:5000/api/v1/rules \
+  -H "Content-Type: application/json" \
+  -d '{"max_per_hour": 5}'
+```
 
-Structuring initial Flask boilerplate
+---
 
-Drafting documentation outline
+## 🏭 Production Considerations
 
-All core business logic including:
+| Current (Demo) | Production |
+|---|---|
+| In-memory dict store | Redis (TTL-based keys) |
+| Single process | Horizontally scalable (stateless workers + shared Redis) |
+| No auth | API key / JWT middleware |
+| Synchronous | Async queue (Celery/RabbitMQ) for "later" events |
+| JSON rules in memory | Rules stored in DB, hot-reloaded via config service |
 
-Decision order
+---
 
-Override behavior
+## 🤖 AI Tools Used
 
-Hashing strategy
+- **Claude (Anthropic):** Used to structure the decision pipeline logic, generate boilerplate Flask code, and draft README sections.
+- **Manual changes:** Decision pipeline order, fallback behavior, near-duplicate hashing strategy, and all business logic thresholds were designed and tuned manually based on the problem constraints.
 
-Fatigue thresholds
+---
 
-were manually designed and implemented.
+## 📁 File Structure
 
-📂 Project Structure
+```
 notification-engine/
-│
-├── app.py      # Core API + decision logic
-├── demo.py     # Test scenarios
-└── README.md   # Documentation
+├── app.py          # Main Flask API + Decision Engine (5 endpoints)
+├── demo.py         # Demo script — runs 12 test scenarios
+└── README.md       # This file
+```
